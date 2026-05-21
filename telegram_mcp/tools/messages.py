@@ -3,6 +3,31 @@
 from telegram_mcp.runtime import *
 
 
+def _extract_message_urls(msg) -> list:
+    """Collect URLs a message carries OUTSIDE its plain-text body.
+
+    `list_messages` returns `msg.message` (Telethon's plain-text body) as the
+    record's `text`. A URL that lives only in a `MessageEntityTextUrl`
+    (hyperlinked text) or a `MessageMediaWebPage` (link preview) is absent
+    from `msg.message`, so a consumer extracting links from `text` alone never
+    sees it. This surfaces those URLs as a separate `urls` field. Returns a
+    de-duplicated list in first-seen order.
+    """
+    urls = []
+    seen = set()
+
+    def _add(u):
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
+
+    for ent in getattr(msg, "entities", None) or []:
+        _add(getattr(ent, "url", None))  # MessageEntityTextUrl carries .url
+    webpage = getattr(getattr(msg, "media", None), "webpage", None)
+    _add(getattr(webpage, "url", None))  # MessageMediaWebPage -> WebPage.url
+    return urls
+
+
 @mcp.tool(annotations=ToolAnnotations(title="Get Messages", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -581,6 +606,11 @@ async def list_messages(
             engagement = get_engagement_dict(msg)
             if engagement:
                 record["engagement"] = engagement
+            urls = _extract_message_urls(msg)
+            if urls:
+                record["urls"] = [
+                    sanitize_user_content(u, max_length=2048) for u in urls
+                ]
             records.append(record)
 
         return format_tool_result(records)
