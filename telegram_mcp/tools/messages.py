@@ -611,6 +611,33 @@ async def list_messages(
                 record["urls"] = [
                     sanitize_user_content(u, max_length=2048) for u in urls
                 ]
+            # Surface document-attachment metadata so a consumer can DETECT a
+            # downloadable document (PDF / docx / slide export / ...) without
+            # downloading it. `msg.document` is the Telethon convenience property
+            # that is None unless the media is a document — so PHOTOS are
+            # intentionally excluded (photo media is `MessageMediaPhoto`, for
+            # which `msg.document` is None). Mirrors the additive, read-only
+            # spirit of the `urls` field. The file name is user-controllable, so
+            # it is sanitized like all other surfaced content.
+            doc = getattr(msg, "document", None)
+            if doc is not None:
+                from telethon.tl.types import DocumentAttributeFilename
+
+                file_name = None
+                for attr in getattr(doc, "attributes", None) or []:
+                    if isinstance(attr, DocumentAttributeFilename):
+                        file_name = attr.file_name
+                        break
+                document = {
+                    "file_id": str(doc.id),
+                    "size": doc.size,
+                    "mime_type": doc.mime_type,
+                }
+                if file_name:
+                    document["file_name"] = sanitize_user_content(
+                        file_name, max_length=512
+                    )
+                record["document"] = document
             records.append(record)
 
         return format_tool_result(records)
