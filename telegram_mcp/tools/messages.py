@@ -3,6 +3,31 @@
 from telegram_mcp.runtime import *
 
 
+def _extract_message_urls(msg) -> list:
+    """Collect URLs a message carries OUTSIDE its plain-text body.
+
+    `list_messages` returns `msg.message` (Telethon's plain-text body) as the
+    record's `text`. A URL that lives only in a `MessageEntityTextUrl`
+    (hyperlinked text) or a `MessageMediaWebPage` (link preview) is absent
+    from `msg.message`, so a consumer extracting links from `text` alone never
+    sees it. This surfaces those URLs as a separate `urls` field. Returns a
+    de-duplicated list in first-seen order.
+    """
+    urls = []
+    seen = set()
+
+    def _add(u):
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
+
+    for ent in getattr(msg, "entities", None) or []:
+        _add(getattr(ent, "url", None))  # MessageEntityTextUrl carries .url
+    webpage = getattr(getattr(msg, "media", None), "webpage", None)
+    _add(getattr(webpage, "url", None))  # MessageMediaWebPage -> WebPage.url
+    return urls
+
+
 @mcp.tool(annotations=ToolAnnotations(title="Get Messages", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -582,6 +607,38 @@ async def list_messages(
             engagement = get_engagement_dict(msg)
             if engagement:
                 record["engagement"] = engagement
+            urls = _extract_message_urls(msg)
+            if urls:
+                record["urls"] = [
+                    sanitize_user_content(u, max_length=2048) for u in urls
+                ]
+            # Surface document-attachment metadata so a consumer can DETECT a
+            # downloadable document (PDF / docx / slide export / ...) without
+            # downloading it. `msg.document` is the Telethon convenience property
+            # that is None unless the media is a document — so PHOTOS are
+            # intentionally excluded (photo media is `MessageMediaPhoto`, for
+            # which `msg.document` is None). Mirrors the additive, read-only
+            # spirit of the `urls` field. The file name is user-controllable, so
+            # it is sanitized like all other surfaced content.
+            doc = getattr(msg, "document", None)
+            if doc is not None:
+                from telethon.tl.types import DocumentAttributeFilename
+
+                file_name = None
+                for attr in getattr(doc, "attributes", None) or []:
+                    if isinstance(attr, DocumentAttributeFilename):
+                        file_name = attr.file_name
+                        break
+                document = {
+                    "file_id": str(doc.id),
+                    "size": doc.size,
+                    "mime_type": doc.mime_type,
+                }
+                if file_name:
+                    document["file_name"] = sanitize_user_content(
+                        file_name, max_length=512
+                    )
+                record["document"] = document
             records.append(record)
 
         return format_tool_result(records)
